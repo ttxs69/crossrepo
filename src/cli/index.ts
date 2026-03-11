@@ -217,7 +217,16 @@ program
     for (const r of preview.repos) {
       console.log(`  ${r.name}: ${r.commits.length} commits × ${r.branches.length} branches = ${r.total} ops`);
     }
-    console.log(chalk.dim('  Total: ') + preview.total + ' operations\n');
+    console.log(chalk.dim('  Total: ') + preview.total + ' operations');
+    
+    // Show warnings
+    if (preview.warnings.length > 0) {
+      console.log(chalk.yellow('\nWarnings:'));
+      for (const w of preview.warnings) {
+        console.log(chalk.yellow(`  ⚠️ ${w}`));
+      }
+    }
+    console.log();
     
     if (options.dryRun) return;
     
@@ -245,13 +254,14 @@ program
     
     spinner.stop();
     
-    const success = results.filter((r) => r.status === 'success').length;
+    const success = results.filter((r) => r.status === 'success' || r.status === 'resolved').length;
+    const resolved = results.filter((r) => r.status === 'resolved').length;
     const conflicts = results.filter((r) => r.status === 'conflict').length;
     const failed = results.filter((r) => r.status === 'failed').length;
     
     console.log(chalk.bold('\nResults:'));
-    console.log(chalk.green(`  ✅ Success: ${success}`));
-    if (conflicts) console.log(chalk.yellow(`  ⚠️ Conflicts: ${conflicts}`));
+    console.log(chalk.green(`  ✅ Success: ${success}`) + (resolved ? chalk.dim(` (${resolved} AI-resolved)`) : ''));
+    if (conflicts) console.log(chalk.yellow(`  ⚠️ Unresolved conflicts: ${conflicts}`));
     if (failed) console.log(chalk.red(`  ❌ Failed: ${failed}`));
   });
 

@@ -208,20 +208,24 @@ export class SyncManager {
     };
 
     try {
-      // Check for uncommitted changes
-      if (await gitManager.hasUncommittedChanges()) {
-        await gitManager.stash(`crossrepo-auto-stash-${Date.now()}`);
+      // Verify commit exists
+      const commitInfo = await gitManager.getCommitInfo(commitHash);
+      if (!commitInfo) {
+        status.status = 'failed';
+        status.error = `Commit ${commitHash} not found in repository`;
+        return status;
       }
 
       // Checkout target branch
       const branchExists = await gitManager.branchExists(targetBranch);
       if (!branchExists && !options.createBranch) {
         status.status = 'failed';
-        status.error = `Branch ${targetBranch} does not exist`;
+        status.error = `Branch ${targetBranch} does not exist. Use --create-branch to create it.`;
         return status;
       }
 
       if (!branchExists) {
+        // Create branch from current HEAD
         await gitManager.createBranch(targetBranch);
       } else {
         await gitManager.checkout(targetBranch);
@@ -234,8 +238,7 @@ export class SyncManager {
 
       if (result.success) {
         // Commit the changes
-        const commitInfo = await gitManager.getCommitInfo(commitHash);
-        await gitManager.commit(`[crossrepo] ${commitInfo?.message || commitHash}`);
+        await gitManager.commit(`[crossrepo] ${commitInfo.message || commitHash}`);
 
         if (options.push) {
           await gitManager.push(targetBranch);
@@ -250,6 +253,10 @@ export class SyncManager {
         if (options.autoResolve && this.aiResolver) {
           const resolved = await this.resolveConflicts(gitManager, result.conflicts, commitHash);
           if (resolved) {
+            // Push if requested after AI resolution
+            if (options.push) {
+              await gitManager.push(targetBranch);
+            }
             status.status = 'resolved';
             status.resolution = 'AI resolved conflicts';
           }
@@ -280,6 +287,9 @@ export class SyncManager {
       // Re-apply the commit with --no-commit to get the changes
       const cherryResult = await gitManager.cherryPick(commitHash, true);
       
+      // Collect files that were skipped due to low confidence
+      const skippedFiles: string[] = [];
+      
       // If still conflicts, resolve them
       if (!cherryResult.success && cherryResult.conflicts) {
         for (const filePath of conflictInfo.files) {
@@ -299,11 +309,19 @@ export class SyncManager {
           // Check confidence - if low, we should not auto-apply
           if (resolution.confidence === 'low') {
             console.warn(`Low confidence resolution for ${filePath}, skipping auto-apply`);
+            skippedFiles.push(filePath);
             continue;
           }
           
           await gitManager.resolveFile(filePath, resolution.content);
         }
+      }
+
+      // If some files were skipped, we can't complete the resolution
+      if (skippedFiles.length > 0) {
+        console.error(`Skipped ${skippedFiles.length} files due to low confidence: ${skippedFiles.join(', ')}`);
+        await gitManager.abortCherryPick();
+        return false;
       }
 
       // Check if there are any staged changes after resolution
@@ -349,11 +367,25 @@ export class SyncManager {
       total: number;
     }>;
     total: number;
+    warnings: string[];
   }> {
     const repos = [];
     let total = 0;
+    const warnings: string[] = [];
 
     for (const [repoName, repoConfig] of Object.entries(this.config.repos)) {
+      const gitManager = this.gitManagers.get(repoName);
+      
+      // Verify commits exist
+      if (gitManager) {
+        for (const commit of repoConfig.commits) {
+          const exists = await gitManager.getCommitInfo(commit);
+          if (!exists) {
+            warnings.push(`Commit ${commit} not found in ${repoName}`);
+          }
+        }
+      }
+
       const repoTotal = repoConfig.commits.length * repoConfig.targetBranches.length;
       total += repoTotal;
 
@@ -365,7 +397,7 @@ export class SyncManager {
       });
     }
 
-    return { repos, total };
+    return { repos, total, warnings };
   }
 
   /**
