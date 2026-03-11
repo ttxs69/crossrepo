@@ -46,10 +46,12 @@ program
       spinner.succeed('CrossRepo initialized');
       
       console.log('\nNext steps:');
-      console.log('  1. crossrepo track <repo> --commits <hashes>');
-      console.log('  2. crossrepo target <repo> --branches <branches>');
-      console.log('  3. crossrepo ai --provider openai');
-      console.log('  4. crossrepo sync --auto-resolve');
+      console.log('  1. crossrepo track <repo> --from-branch <feature> --base main');
+      console.log('     or: crossrepo track <repo> -c <commit1,commit2>');
+      console.log('  2. crossrepo target <repo> -b main,develop');
+      console.log('  3. crossrepo ai --provider openai  (optional)');
+      console.log('  4. crossrepo feature save <name>   (optional)');
+      console.log('  5. crossrepo sync --auto-resolve --push');
       
     } catch (error) {
       spinner.fail('Failed');

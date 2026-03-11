@@ -90,14 +90,17 @@ export class GitManager {
     date: string;
   } | null> {
     try {
-      const log = await this.git.log(['-1', '--format=%H%n%s%n%an%n%ai', commitHash]);
-      if (log.latest) {
-        return {
-          hash: log.latest.hash,
-          message: log.latest.message,
-          author: log.latest.author_name || 'unknown',
-          date: log.latest.date,
-        };
+      const result = await this.git.raw(['log', '-1', '--format=%H%n%s%n%an%n%ai', commitHash]);
+      if (result) {
+        const lines = result.trim().split('\n');
+        if (lines.length >= 4) {
+          return {
+            hash: lines[0],
+            message: lines[1],
+            author: lines[2],
+            date: lines[3],
+          };
+        }
       }
       return null;
     } catch {
