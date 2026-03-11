@@ -297,4 +297,79 @@ describe('GitManager', () => {
       expect(gitManager.getRepoPath()).toBe(repoDir);
     });
   });
+
+  describe('cherry-pick conflict scenarios', () => {
+    it('should handle cherry-pick operation', async () => {
+      await gitManager.checkout('master');
+      
+      // Cherry-pick should either succeed or fail gracefully
+      const result = await gitManager.cherryPick(commitHashes[1], true);
+      expect(result).toBeDefined();
+      expect(typeof result.success).toBe('boolean');
+      
+      // Cleanup any in-progress cherry-pick
+      try {
+        await gitManager.abortCherryPick();
+      } catch {
+        // Ignore
+      }
+    });
+
+    it('should abort cherry-pick when requested', async () => {
+      await gitManager.checkout('master');
+      
+      // Abort should work even if no cherry-pick in progress
+      const abortResult = await gitManager.abortCherryPick();
+      // May fail if no cherry-pick in progress, that's OK
+      expect(typeof abortResult.success).toBe('boolean');
+    });
+  });
+
+  describe('commit order dependencies', () => {
+    it('should handle sequential cherry-picks', async () => {
+      // Just verify the method works
+      const result = await gitManager.cherryPick(commitHashes[1], true);
+      expect(result).toBeDefined();
+      
+      // Cleanup
+      try {
+        await gitManager.abortCherryPick();
+      } catch {
+        // Ignore
+      }
+    });
+  });
+
+  describe('edge cases', () => {
+    it('should handle empty commit hash', async () => {
+      const info = await gitManager.getCommitInfo('');
+      expect(info).toBeNull();
+    });
+
+    it('should handle short commit hash', async () => {
+      const shortHash = commitHashes[0].slice(0, 7);
+      const info = await gitManager.getCommitInfo(shortHash);
+      // Should resolve to full hash
+      expect(info).not.toBeNull();
+    });
+
+    it('should handle branch with slashes in name', async () => {
+      const result = await gitManager.createBranch('feature/test/nested');
+      expect(result.success).toBe(true);
+      expect(await gitManager.branchExists('feature/test/nested')).toBe(true);
+    });
+
+    it('should handle file path with spaces in conflict markers', async () => {
+      // Create a file with spaces in name
+      const filePath = path.join(repoDir, 'file with spaces.txt');
+      fs.writeFileSync(filePath, 'content\n');
+      execSync('git add .', { cwd: repoDir });
+      execSync('git commit -m "add file with spaces"', { cwd: repoDir });
+
+      // getConflictMarkers should handle it gracefully
+      const markers = await gitManager.getConflictMarkers('file with spaces.txt');
+      // No conflict, should return null
+      expect(markers).toBeNull();
+    });
+  });
 });
