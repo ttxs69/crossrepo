@@ -26,6 +26,17 @@ export interface SyncProgress {
   };
 }
 
+export interface SyncState {
+  /** Repo name */
+  repo: string;
+  /** Branch name */
+  branch: string;
+  /** Stash reference if changes were stashed */
+  stashRef?: string;
+  /** Original branch before sync */
+  originalBranch?: string;
+}
+
 export type ProgressCallback = (progress: SyncProgress, status: SyncStatus) => void;
 
 export class SyncManager {
@@ -34,6 +45,8 @@ export class SyncManager {
   private gitManagers: Map<string, GitManager> = new Map();
   private aiResolver: AIResolver | null = null;
   private progressCallback?: ProgressCallback;
+  /** Track stashes for restoration */
+  private stashes: Map<string, string> = new Map();
 
   constructor(config: ProjectConfig, configManager: ConfigManager) {
     this.config = config;
@@ -71,44 +84,113 @@ export class SyncManager {
       conflicts: 0,
     };
 
-    for (const [repoName, repoConfig] of Object.entries(this.config.repos)) {
-      const gitManager = this.gitManagers.get(repoName);
-      if (!gitManager) continue;
+    // Track state for rollback/cleanup
+    const syncStates: SyncState[] = [];
 
-      for (const branch of repoConfig.targetBranches) {
-        for (const commit of repoConfig.commits) {
-          progress.current = { repo: repoName, branch, commit };
-          
-          const status = await this.syncCommit(
-            gitManager,
-            repoName,
-            branch,
-            commit,
-            options
-          );
+    try {
+      for (const [repoName, repoConfig] of Object.entries(this.config.repos)) {
+        const gitManager = this.gitManagers.get(repoName);
+        if (!gitManager) continue;
 
-          results.push(status);
-
-          if (status.status === 'success') {
-            progress.completed++;
-          } else if (status.status === 'conflict') {
-            progress.conflicts++;
-            if (!options.continueOnError) {
-              break;
-            }
-          } else if (status.status === 'failed') {
-            progress.failed++;
-            if (!options.continueOnError) {
-              break;
-            }
+        // Save original state
+        const originalBranch = await gitManager.getCurrentBranch();
+        
+        // Stash if needed
+        if (await gitManager.hasUncommittedChanges()) {
+          const stashRef = `crossrepo-${Date.now()}`;
+          const stashResult = await gitManager.stash(stashRef);
+          if (stashResult.success) {
+            this.stashes.set(repoName, stashRef);
+            syncStates.push({ repo: repoName, branch: originalBranch, stashRef, originalBranch });
+          } else {
+            // Failed to stash, abort
+            results.push({
+              repo: repoName,
+              branch: originalBranch,
+              commit: '',
+              status: 'failed',
+              error: 'Failed to stash uncommitted changes. Please commit or stash manually.',
+            });
+            continue;
           }
+        } else {
+          syncStates.push({ repo: repoName, branch: originalBranch, originalBranch });
+        }
 
-          this.progressCallback?.(progress, status);
+        for (const branch of repoConfig.targetBranches) {
+          for (const commit of repoConfig.commits) {
+            progress.current = { repo: repoName, branch, commit };
+            
+            const status = await this.syncCommit(
+              gitManager,
+              repoName,
+              branch,
+              commit,
+              options
+            );
+
+            results.push(status);
+
+            if (status.status === 'success') {
+              progress.completed++;
+            } else if (status.status === 'conflict') {
+              progress.conflicts++;
+              if (!options.continueOnError) {
+                // Cleanup and stop
+                await this.cleanup(syncStates);
+                return results;
+              }
+            } else if (status.status === 'failed') {
+              progress.failed++;
+              if (!options.continueOnError) {
+                // Cleanup and stop
+                await this.cleanup(syncStates);
+                return results;
+              }
+            }
+
+            this.progressCallback?.(progress, status);
+          }
         }
       }
+    } finally {
+      // Always try to restore stashed changes
+      await this.cleanup(syncStates);
     }
 
     return results;
+  }
+
+  /**
+   * Cleanup and restore state after sync
+   */
+  private async cleanup(states: SyncState[]): Promise<void> {
+    for (const state of states) {
+      const gitManager = this.gitManagers.get(state.repo);
+      if (!gitManager) continue;
+
+      // Restore original branch if different
+      if (state.originalBranch) {
+        const currentBranch = await gitManager.getCurrentBranch();
+        if (currentBranch !== state.originalBranch) {
+          try {
+            await gitManager.checkout(state.originalBranch);
+          } catch {
+            // Ignore checkout errors during cleanup
+          }
+        }
+      }
+
+      // Pop stash if we stashed
+      if (state.stashRef) {
+        try {
+          await gitManager.stashPop();
+          this.stashes.delete(state.repo);
+        } catch {
+          // Stash pop may fail if conflicts, that's OK
+        }
+      }
+    }
   }
 
   private async syncCommit(
@@ -192,29 +274,58 @@ export class SyncManager {
     if (!this.aiResolver) return false;
 
     try {
-      for (const filePath of conflictInfo.files) {
-        const markers = await gitManager.getConflictMarkers(filePath);
-        if (!markers) continue;
+      // Abort the cherry-pick first - we'll resolve manually and commit
+      await gitManager.abortCherryPick();
 
-        const request: AIResolutionRequest = {
-          filePath,
-          ours: markers.ours,
-          theirs: markers.theirs,
-          base: markers.base,
-          commitMessage: commitHash,
-        };
+      // Re-apply the commit with --no-commit to get the changes
+      const cherryResult = await gitManager.cherryPick(commitHash, true);
+      
+      // If still conflicts, resolve them
+      if (!cherryResult.success && cherryResult.conflicts) {
+        for (const filePath of conflictInfo.files) {
+          const markers = await gitManager.getConflictMarkers(filePath);
+          if (!markers) continue;
 
-        const resolution = await this.aiResolver.resolveConflict(request);
-        
-        await gitManager.resolveFile(filePath, resolution.content);
+          const request: AIResolutionRequest = {
+            filePath,
+            ours: markers.ours,
+            theirs: markers.theirs,
+            base: markers.base,
+            commitMessage: commitHash,
+          };
+
+          const resolution = await this.aiResolver.resolveConflict(request);
+          
+          // Check confidence - if low, we should not auto-apply
+          if (resolution.confidence === 'low') {
+            console.warn(`Low confidence resolution for ${filePath}, skipping auto-apply`);
+            continue;
+          }
+          
+          await gitManager.resolveFile(filePath, resolution.content);
+        }
       }
 
-      // Continue cherry-pick
-      await gitManager.continueCherryPick();
+      // Check if there are any staged changes after resolution
+      const hasStaged = await gitManager.hasStagedChanges();
+      if (hasStaged) {
+        const commitInfo = await gitManager.getCommitInfo(commitHash);
+        const commitResult = await gitManager.commit(
+          `[crossrepo] ${commitInfo?.message || commitHash}`
+        );
+        return commitResult.success;
+      }
+      
+      // No changes after resolution - that's still success (empty commit)
       return true;
     } catch (error) {
       console.error(`Failed to resolve conflicts: ${error}`);
-      await gitManager.abortCherryPick();
+      // Make sure we're not in a bad state
+      try {
+        await gitManager.abortCherryPick();
+      } catch {
+        // Ignore
+      }
       return false;
     }
   }

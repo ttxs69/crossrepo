@@ -78,10 +78,13 @@ Rules:
       const explanationMatch = content.match(/```\s*[\s\S]*?\n(.+)$/s);
       const explanation = explanationMatch ? explanationMatch[1].trim() : 'AI resolved the conflict';
 
+      // Determine confidence based on content analysis
+      const confidence = this.determineConfidence(request, resolvedCode, explanation);
+
       return {
         content: resolvedCode,
         explanation,
-        confidence: 'medium',
+        confidence,
       };
     } catch (error) {
       throw new Error(`AI resolution failed: ${error}`);
@@ -179,5 +182,63 @@ Please provide the resolved version that properly merges both changes. Return th
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Determine confidence level for resolution
+   */
+  private determineConfidence(
+    request: AIResolutionRequest,
+    resolvedCode: string,
+    explanation: string
+  ): 'high' | 'medium' | 'low' {
+    // Low confidence indicators
+    const lowConfidenceSignals = [
+      /cannot (resolve|determine|merge)/i,
+      /ambiguous/i,
+      /unclear/i,
+      /unable to/i,
+      /not sure/i,
+      /might need/i,
+      /please (review|verify|check)/i,
+    ];
+
+    // High confidence indicators
+    const highConfidenceSignals = [
+      /cleanly merged/i,
+      /straightforward/i,
+      /no conflict/i,
+      /successfully (merged|combined|integrated)/i,
+    ];
+
+    // Check for low confidence signals
+    for (const signal of lowConfidenceSignals) {
+      if (signal.test(explanation)) {
+        return 'low';
+      }
+    }
+
+    // Check for high confidence signals
+    for (const signal of highConfidenceSignals) {
+      if (signal.test(explanation)) {
+        return 'high';
+      }
+    }
+
+    // Check if resolved code is very different from both inputs
+    const oursLen = request.ours.length;
+    const theirsLen = request.theirs.length;
+    const resolvedLen = resolvedCode.length;
+    
+    // If resolved code is suspiciously different (very short or very long)
+    if (resolvedLen < Math.min(oursLen, theirsLen) * 0.3) {
+      return 'low'; // Resolved code seems too short
+    }
+    if (resolvedLen > (oursLen + theirsLen) * 1.5) {
+      return 'low'; // Resolved code seems bloated
+    }
+
+    // Default to medium confidence
+    return 'medium';
   }
 }

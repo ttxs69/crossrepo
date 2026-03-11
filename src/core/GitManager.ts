@@ -225,10 +225,23 @@ export class GitManager {
   }
 
   /**
-   * Commit staged changes
+   * Check if there are staged changes
+   */
+  async hasStagedChanges(): Promise<boolean> {
+    const status = await this.git.status();
+    return status.staged.length > 0;
+  }
+
+  /**
+   * Commit staged changes (only if there are staged changes)
    */
   async commit(message: string): Promise<GitResult> {
     try {
+      const hasStaged = await this.hasStagedChanges();
+      if (!hasStaged) {
+        // No changes to commit, this is OK - cherry-pick was empty
+        return { success: true, output: 'No changes to commit' };
+      }
       await this.git.commit(message);
       return { success: true };
     } catch (error) {
@@ -323,6 +336,32 @@ export class GitManager {
       return { success: true };
     } catch (error) {
       return { success: false, error: String(error) };
+    }
+  }
+
+  /**
+   * Get stash list
+   */
+  async stashList(): Promise<string[]> {
+    try {
+      const result = await this.git.stashList();
+      return result.all.map((s) => s.hash);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Check if cherry-pick is in progress
+   */
+  async isCherryPickInProgress(): Promise<boolean> {
+    try {
+      const fs = await import('fs');
+      const path = await import('path');
+      const cherryPickState = path.join(this.repoPath, '.git', 'CHERRY_PICK_HEAD');
+      return fs.existsSync(cherryPickState);
+    } catch {
+      return false;
     }
   }
 

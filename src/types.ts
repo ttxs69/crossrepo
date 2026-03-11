@@ -176,3 +176,17 @@ export interface CherryPickResult {
   error?: string;
   conflicts?: ConflictInfo;
 }
+
+/**
+ * Sync state for cleanup/rollback
+ */
+export interface SyncState {
+  /** Repo name */
+  repo: string;
+  /** Branch name */
+  branch: string;
+  /** Stash reference if changes were stashed */
+  stashRef?: string;
+  /** Original branch before sync */
+  originalBranch?: string;
+}
