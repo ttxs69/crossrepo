@@ -366,6 +366,52 @@ export class GitManager {
   }
 
   /**
+   * Get commits between two branches (exclusive of base)
+   * Returns commits from feature branch that are not in base branch
+   */
+  async getCommitsBetween(featureBranch: string, baseBranch: string): Promise<string[]> {
+    try {
+      // Use git log to get commits in featureBranch but not in baseBranch
+      const log = await this.git.log([`${baseBranch}..${featureBranch}`]);
+      // Return in chronological order (oldest first)
+      return log.all.map((c) => c.hash).reverse();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get commits in a branch since a certain point
+   */
+  async getCommitsSince(branch: string, since: string): Promise<string[]> {
+    try {
+      const log = await this.git.log([branch, '--since', since]);
+      return log.all.map((c) => c.hash).reverse();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get list of commits with details
+   */
+  async getCommitList(commitHashes: string[]): Promise<Array<{
+    hash: string;
+    message: string;
+    author: string;
+    date: string;
+  }>> {
+    const commits = [];
+    for (const hash of commitHashes) {
+      const info = await this.getCommitInfo(hash);
+      if (info) {
+        commits.push(info);
+      }
+    }
+    return commits;
+  }
+
+  /**
    * Get repo path
    */
   getRepoPath(): string {

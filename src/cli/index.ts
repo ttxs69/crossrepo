@@ -64,7 +64,9 @@ program
   .description('Track a repository and its commits')
   .option('-p, --path <path>', 'Project path', '.')
   .option('-c, --commits <commits>', 'Commit hashes (comma-separated)')
-  .action(async (repo: string, options: { path: string; commits: string }) => {
+  .option('--from-branch <branch>', 'Get commits from this feature branch')
+  .option('--base <branch>', 'Base branch to compare against (default: main)', 'main')
+  .action(async (repo: string, options: { path: string; commits: string; fromBranch: string; base: string }) => {
     const spinner = ora(`Tracking ${repo}...`).start();
     
     try {
@@ -76,15 +78,42 @@ program
         process.exit(1);
       }
       
-      const commits = options.commits?.split(',').map((c) => c.trim()) || [];
-      
       if (!GitManager.isRepo(repo)) {
         spinner.fail(`Not a git repo: ${repo}`);
         process.exit(1);
       }
       
+      let commits: string[] = [];
+      
+      // Get commits from branch range if specified
+      if (options.fromBranch) {
+        const gitManager = new GitManager(repo);
+        commits = await gitManager.getCommitsBetween(options.fromBranch, options.base);
+        
+        if (commits.length === 0) {
+          spinner.warn(`No commits found between ${options.base}..${options.fromBranch}`);
+          return;
+        }
+        
+        // Show commits being tracked
+        spinner.text = `Found ${commits.length} commits in ${options.fromBranch}`;
+      } else if (options.commits) {
+        commits = options.commits.split(',').map((c) => c.trim());
+      }
+      
       configManager.addRepo(config, repo, repo, commits);
       spinner.succeed(`Tracked ${repo}: ${commits.length} commits`);
+      
+      // Show commit list
+      if (commits.length > 0) {
+        const gitManager = new GitManager(repo);
+        const commitList = await gitManager.getCommitList(commits);
+        console.log(chalk.dim('\nCommits:'));
+        for (const c of commitList) {
+          console.log(chalk.dim(`  ${c.hash.slice(0, 7)} ${c.message.split('\n')[0]}`));
+        }
+        console.log();
+      }
       
     } catch (error) {
       spinner.fail('Failed');
@@ -254,15 +283,56 @@ program
     
     spinner.stop();
     
-    const success = results.filter((r) => r.status === 'success' || r.status === 'resolved').length;
-    const resolved = results.filter((r) => r.status === 'resolved').length;
-    const conflicts = results.filter((r) => r.status === 'conflict').length;
-    const failed = results.filter((r) => r.status === 'failed').length;
+    // Group results by repo
+    const byRepo: Record<string, typeof results> = {};
+    for (const r of results) {
+      if (!byRepo[r.repo]) byRepo[r.repo] = [];
+      byRepo[r.repo].push(r);
+    }
     
-    console.log(chalk.bold('\nResults:'));
-    console.log(chalk.green(`  ✅ Success: ${success}`) + (resolved ? chalk.dim(` (${resolved} AI-resolved)`) : ''));
-    if (conflicts) console.log(chalk.yellow(`  ⚠️ Unresolved conflicts: ${conflicts}`));
-    if (failed) console.log(chalk.red(`  ❌ Failed: ${failed}`));
+    console.log(chalk.bold('\nResults by Repository:'));
+    console.log('─'.repeat(50));
+    
+    let totalSuccess = 0;
+    let totalResolved = 0;
+    let totalConflicts = 0;
+    let totalFailed = 0;
+    
+    for (const [repo, repoResults] of Object.entries(byRepo)) {
+      const success = repoResults.filter((r) => r.status === 'success').length;
+      const resolved = repoResults.filter((r) => r.status === 'resolved').length;
+      const conflicts = repoResults.filter((r) => r.status === 'conflict').length;
+      const failed = repoResults.filter((r) => r.status === 'failed').length;
+      
+      totalSuccess += success;
+      totalResolved += resolved;
+      totalConflicts += conflicts;
+      totalFailed += failed;
+      
+      const statusIcon = failed > 0 ? '❌' : conflicts > 0 ? '⚠️' : '✅';
+      console.log(`\n${statusIcon} ${chalk.bold(repo)} (${repoResults.length} ops)`);
+      
+      if (success > 0) console.log(chalk.green(`   ✅ Success: ${success}`));
+      if (resolved > 0) console.log(chalk.cyan(`   🤖 AI-resolved: ${resolved}`));
+      if (conflicts > 0) console.log(chalk.yellow(`   ⚠️ Unresolved: ${conflicts}`));
+      if (failed > 0) {
+        console.log(chalk.red(`   ❌ Failed: ${failed}`));
+        // Show first failure reason
+        const firstFailed = repoResults.find((r) => r.status === 'failed');
+        if (firstFailed?.error) {
+          console.log(chalk.red.dim(`      ${firstFailed.error}`));
+        }
+      }
+    }
+    
+    // Summary
+    console.log('\n' + '─'.repeat(50));
+    console.log(chalk.bold('Summary:'));
+    const totalOk = totalSuccess + totalResolved;
+    const total = totalOk + totalConflicts + totalFailed;
+    console.log(chalk.green(`  ✅ ${totalOk}/${total} successful`) + (totalResolved ? chalk.cyan(` (${totalResolved} AI-resolved)`) : ''));
+    if (totalConflicts) console.log(chalk.yellow(`  ⚠️ ${totalConflicts} conflicts need manual resolution`));
+    if (totalFailed) console.log(chalk.red(`  ❌ ${totalFailed} failed`));
   });
 
 // --- Status Command ---
@@ -316,6 +386,113 @@ program
       console.log(`  Provider: ${config.ai.provider}`);
       console.log(`  Model: ${config.ai.model}`);
     }
+  });
+
+// --- Feature Command ---
+const featureCmd = program
+  .command('feature')
+  .description('Manage feature configurations');
+
+featureCmd
+  .command('save <name>')
+  .description('Save current configuration as a feature')
+  .option('-p, --path <path>', 'Project path', '.')
+  .option('-d, --description <desc>', 'Feature description')
+  .action(async (name: string, options: { path: string; description: string }) => {
+    const configManager = new ConfigManager(options.path);
+    const config = configManager.load();
+    
+    if (!config) {
+      console.error(chalk.red('Run `crossrepo init` first'));
+      process.exit(1);
+    }
+    
+    const featureConfig = configManager.toFeatureConfig(config);
+    featureConfig.name = name;
+    if (options.description) {
+      featureConfig.description = options.description;
+    }
+    
+    configManager.saveFeature(featureConfig);
+    console.log(chalk.green(`✅ Feature "${name}" saved`));
+    console.log(chalk.dim(`   ${Object.keys(config.repos).length} repos, ${featureConfig.repos[Object.keys(config.repos)[0]]?.commits.length || 0} commits`));
+  });
+
+featureCmd
+  .command('load <name>')
+  .description('Load a saved feature configuration')
+  .option('-p, --path <path>', 'Project path', '.')
+  .action(async (name: string, options: { path: string }) => {
+    const configManager = new ConfigManager(options.path);
+    const featureConfig = configManager.loadFeature(name);
+    
+    if (!featureConfig) {
+      console.error(chalk.red(`Feature "${name}" not found`));
+      process.exit(1);
+    }
+    
+    // Convert to project config and save
+    const config: any = {
+      feature: featureConfig.name,
+      ai: featureConfig.ai,
+      repos: featureConfig.repos,
+    };
+    configManager.save(config);
+    
+    console.log(chalk.green(`✅ Feature "${name}" loaded`));
+    console.log(chalk.dim(`   ${Object.keys(config.repos).length} repos`));
+    
+    if (featureConfig.description) {
+      console.log(chalk.dim(`   ${featureConfig.description}`));
+    }
+  });
+
+featureCmd
+  .command('list')
+  .description('List all saved features')
+  .option('-p, --path <path>', 'Project path', '.')
+  .action(async (options: { path: string }) => {
+    const configManager = new ConfigManager(options.path);
+    const features = configManager.listFeatures();
+    
+    if (features.length === 0) {
+      console.log(chalk.dim('No saved features'));
+      return;
+    }
+    
+    console.log(chalk.bold('\nSaved Features:'));
+    for (const name of features) {
+      const feature = configManager.loadFeature(name);
+      if (feature) {
+        const repoCount = Object.keys(feature.repos).length;
+        const commitCount = Object.values(feature.repos).reduce((sum, r) => sum + r.commits.length, 0);
+        console.log(`  ${name}:`);
+        console.log(chalk.dim(`    ${repoCount} repos, ${commitCount} commits`));
+        if (feature.description) {
+          console.log(chalk.dim(`    ${feature.description}`));
+        }
+      }
+    }
+  });
+
+featureCmd
+  .command('delete <name>')
+  .description('Delete a saved feature')
+  .option('-p, --path <path>', 'Project path', '.')
+  .action(async (name: string, options: { path: string }) => {
+    const configManager = new ConfigManager(options.path);
+    const featureConfig = configManager.loadFeature(name);
+    
+    if (!featureConfig) {
+      console.error(chalk.red(`Feature "${name}" not found`));
+      process.exit(1);
+    }
+    
+    const fs = require('fs');
+    const path = require('path');
+    const featurePath = path.join(options.path, '.crossrepo/features', `${name}.yaml`);
+    fs.unlinkSync(featurePath);
+    console.log(chalk.green(`✅ Feature "${name}" deleted`));
   });
 
 program.parse();
